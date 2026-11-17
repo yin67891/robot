@@ -493,23 +493,23 @@
   }
 })();
 
-// 自動從同資料夾讀取 JSON 備份並更新 Local Storage
-fetch('./local_storage_backup.json')
+// 自動從同資料夾讀取 test.json 備份並更新 Local Storage
+fetch('./test.json')
   .then(response => {
-    if (!response.ok) throw new Error('找不到 JSON 檔案');
+    if (!response.ok) throw new Error('找不到 test.json 檔案');
     return response.json();
   })
   .then(data => {
     Object.keys(data).forEach(key => {
       localStorage.setItem(key, data[key]);
     });
-    console.log('Local Storage 資料已成功從雲端載入！');
+    console.log('Local Storage 資料已成功從 test.json 載入！');
     setTimeout(() => {
       location.reload();
     }, 100);
   })
   .catch(error => {
-    console.error('讀取 Local Storage 失敗:', error);
+    console.error('讀取失敗:', error);
   });
 </script>
 <header class="no-print">
