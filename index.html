@@ -471,24 +471,39 @@
 </head>
 <body>
 <script>
-(function(){var ok=true;try{localStorage.setItem("_t","1");localStorage.removeItem("_t");}catch(e){ok=false;}
-if(!ok){var m={};var ls={setItem:function(k,v){return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null;},setItem:function(k,v){m[k]=String(v);},removeItem:function(k){delete m[k];},clear:function(m){m={};};
-try{Object.defineProperty(window,"localStorage",{configurable:true,get:function(){return ls;}});}}catch(e){}}})();
+(function(){
+  var ok = true;
+  try {
+    localStorage.setItem("_t", "1");
+    localStorage.removeItem("_t");
+  } catch(e) { 
+    ok = false; 
+  }
+  if (!ok) {
+    var m = {};
+    var ls = {
+      getItem: function(k){ return Object.prototype.hasOwnProperty.call(m,k) ? m[k] : null; },
+      setItem: function(k,v){ m[k] = String(v); },
+      removeItem: function(k){ delete m[k]; },
+      clear: function(){ m = {}; }
+    };
+    try {
+      Object.defineProperty(window, "localStorage", { configurable: true, get: function(){ return ls; } });
+    } catch(e) {}
+  }
+})();
 
-// === 自動從同資料夾讀取 JSON 備份並更新 Local Storage ===
+// 自動從同資料夾讀取 JSON 備份並更新 Local Storage
 fetch('./local_storage_backup.json')
   .then(response => {
     if (!response.ok) throw new Error('找不到 JSON 檔案');
     return response.json();
   })
   .then(data => {
-    // 將 JSON 裡的資料寫回 localStorage
     Object.keys(data).forEach(key => {
       localStorage.setItem(key, data[key]);
     });
     console.log('Local Storage 資料已成功從雲端載入！');
-    
-    // 延遲 100 毫秒後自動重新整理，確保資料寫入完成並即時渲染畫面
     setTimeout(() => {
       location.reload();
     }, 100);
