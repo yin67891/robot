@@ -733,7 +733,7 @@ try{Object.defineProperty(window,"localStorage",{configurable:true,get:function(
           <button class="btn btn-warn" onclick="syncCurrentSetToPaper()">帶入目前練習題組 (<span id="paper-sync-cnt">532</span>題)</button>
           <button class="btn btn-primary" onclick="generateRandomPaper()">依設定隨機組卷</button>
           <button class="btn btn-success js-print" onclick="window.print()">列印 / 存成 PDF</button>
-          <button class="btn btn-indigo" onclick="exportPaperToWord()">匯出 Word (.doc)</button>
+          <button class="btn btn-indigo" onclick="exportPaperToWord()">匯出 Word (.docx)</button>
         </div>
       </div>
       <div class="filter-grid" style="margin-bottom:0;">
@@ -2674,16 +2674,267 @@ function renderPaper() {
   }).join("");
 }
 
-function exportPaperToWord() {
-  const bodyHtml = document.getElementById("print-area").innerHTML;
-  const doc = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-    <head><meta charset='utf-8'><title>TAIROA 機器人學試卷</title>
-    <style>body{font-family:'Microsoft JhengHei',sans-serif;font-size:11pt;line-height:1.5;}</style>
-    </head><body>${bodyHtml}</body></html>`;
-  const blob = new Blob(["\ufeff", doc], { type: "application/msword" });
+// ============================================================================
+// 匯出 Word (.docx)：直接組出標準 .docx（OOXML + ZIP），不依賴外部套件
+// ============================================================================
+const _crcTable = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(u8) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < u8.length; i++) c = _crcTable[(c ^ u8[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+// 無壓縮 ZIP（docx 允許 store 模式）
+function zipStore(files, mime) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const chunks = [], central = [];
+  let offset = 0;
+  const u16 = n => new Uint8Array([n & 255, (n >>> 8) & 255]);
+  const u32 = n => new Uint8Array([n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255]);
+  const cat = (...a) => { let len = 0; a.forEach(x => len += x.length); const o = new Uint8Array(len); let p = 0; a.forEach(x => { o.set(x, p); p += x.length; }); return o; };
+  files.forEach(f => {
+    const name = enc.encode(f.name), data = f.data, crc = crc32(data);
+    const local = cat(u32(0x04034b50), u16(20), u16(0x0800), u16(0), u16(dosTime), u16(dosDate), u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), name);
+    chunks.push(local, data);
+    central.push(cat(u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(0), u16(dosTime), u16(dosDate), u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), name));
+    offset += local.length + data.length;
+  });
+  const cd = cat(...central);
+  const end = cat(u32(0x06054b50), u16(0), u16(0), u16(files.length), u16(files.length), u32(cd.length), u32(offset), u16(0));
+  return new Blob([...chunks, cd, end], { type: mime });
+}
+
+function xmlEsc(s) {
+  return String(s == null ? "" : s)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function htmlToPlain(html) {
+  const d = document.createElement("div");
+  d.innerHTML = String(html == null ? "" : html);
+  return d.textContent;
+}
+function wRun(text, o = {}) {
+  if (text === "" || text == null) return "";
+  const rpr = (o.bold ? "<w:b/>" : "") + (o.color ? `<w:color w:val="${o.color}"/>` : "") +
+              (o.size ? `<w:sz w:val="${o.size}"/><w:szCs w:val="${o.size}"/>` : "");
+  const inner = String(text).split("\n").map((t, i) => (i ? "<w:br/>" : "") + (t ? `<w:t xml:space="preserve">${xmlEsc(t)}</w:t>` : "")).join("");
+  return `<w:r>${rpr ? `<w:rPr>${rpr}</w:rPr>` : ""}${inner}</w:r>`;
+}
+function wPara(runs, o = {}) {
+  const ppr = (o.keepNext ? "<w:keepNext/>" : "") +
+    (o.border ? `<w:pBdr><w:bottom w:val="single" w:sz="${o.border}" w:space="4" w:color="${o.borderColor || "0F172A"}"/></w:pBdr>` : "") +
+    (o.shade ? `<w:shd w:val="clear" w:color="auto" w:fill="${o.shade}"/>` : "") +
+    `<w:spacing w:before="${o.before || 0}" w:after="${o.after === undefined ? 60 : o.after}" w:line="${o.line || 300}" w:lineRule="auto"/>` +
+    (o.ind ? `<w:ind w:left="${o.ind}"/>` : "") + (o.center ? '<w:jc w:val="center"/>' : "");
+  return `<w:p><w:pPr>${ppr}</w:pPr>${runs}</w:p>`;
+}
+
+function dataUrlToBytes(url) {
+  const m = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
+  if (!m) throw new Error("bad data url");
+  const bin = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return { mime: (m[1] || "").toLowerCase(), u8 };
+}
+function loadImg(src) {
+  return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error("img")); im.src = src; });
+}
+function canvasToPng(canvas) {
+  return new Promise((res, rej) => canvas.toBlob(async b => { if (!b) return rej(new Error("png")); res(new Uint8Array(await b.arrayBuffer())); }, "image/png"));
+}
+// 任何圖片（data URL）→ { u8, ext, w, h }；Word 只認 png / jpeg / gif，其餘轉成 png
+async function rasterFromDataUrl(url) {
+  const im = await loadImg(url);
+  const { mime, u8 } = dataUrlToBytes(url);
+  if (mime === "image/png") return { u8, ext: "png", w: im.naturalWidth, h: im.naturalHeight };
+  if (mime === "image/jpeg" || mime === "image/jpg") return { u8, ext: "jpeg", w: im.naturalWidth, h: im.naturalHeight };
+  if (mime === "image/gif") return { u8, ext: "gif", w: im.naturalWidth, h: im.naturalHeight };
+  const c = document.createElement("canvas");
+  c.width = im.naturalWidth || 1; c.height = im.naturalHeight || 1;
+  const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(im, 0, 0);
+  return { u8: await canvasToPng(c), ext: "png", w: c.width, h: c.height };
+}
+// 內建向量圖（SVG 元素）→ PNG
+async function rasterFromSvg(svgEl) {
+  const vb = (svgEl.getAttribute("viewBox") || "0 0 420 230").trim().split(/[\s,]+/).map(Number);
+  const vw = vb[2] || 420, vh = vb[3] || 230, scale = 2;
+  const c = svgEl.cloneNode(true);
+  c.removeAttribute("style");
+  c.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  c.setAttribute("width", vw * scale); c.setAttribute("height", vh * scale);
+  const xml = new XMLSerializer().serializeToString(c);
+  const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
+  try {
+    const im = await loadImg(url);
+    const cv = document.createElement("canvas");
+    cv.width = vw * scale; cv.height = vh * scale;
+    const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(im, 0, 0, cv.width, cv.height);
+    return { u8: await canvasToPng(cv), ext: "png", w: vw, h: vh };
+  } finally { URL.revokeObjectURL(url); }
+}
+
+function docxBuilder() {
+  const media = [];   // { name, u8, ext }
+  let docPrId = 1;
+  // 回傳一個行內圖片 run；maxW/maxH 單位 cm
+  function imageRun(r, maxWcm, maxHcm) {
+    const rid = "rIdImg" + (media.length + 1);
+    media.push({ name: `image${media.length + 1}.${r.ext}`, u8: r.u8, ext: r.ext, rid });
+    let w = (r.w || 100) * 9525, h = (r.h || 100) * 9525;     // px → EMU
+    const k = Math.min(1, (maxWcm * 360000) / w, (maxHcm * 360000) / h);
+    const cx = Math.max(1, Math.round(w * k)), cy = Math.max(1, Math.round(h * k));
+    const id = docPrId++;
+    return `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${id}" name="Picture ${id}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="image${id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  }
+  return { media, imageRun };
+}
+
+// HTML <table>（規格表）→ Word 表格
+function wTableFromHtml(tbl) {
+  const rows = [...tbl.rows];
+  const ncols = Math.max(1, ...rows.map(r => [...r.cells].reduce((s, c) => s + (c.colSpan || 1), 0)));
+  const total = 6600, colW = Math.floor(total / ncols);
+  const b = n => `<w:${n} w:val="single" w:sz="4" w:space="0" w:color="64748B"/>`;
+  let x = `<w:tbl><w:tblPr><w:tblW w:w="${colW * ncols}" w:type="dxa"/><w:tblBorders>${b("top")}${b("left")}${b("bottom")}${b("right")}${b("insideH")}${b("insideV")}</w:tblBorders><w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="30" w:type="dxa"/><w:left w:w="80" w:type="dxa"/><w:bottom w:w="30" w:type="dxa"/><w:right w:w="80" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>${"<w:gridCol w:w=\"" + colW + "\"/>".repeat(ncols)}</w:tblGrid>`;
+  rows.forEach(r => {
+    x += "<w:tr><w:trPr><w:cantSplit/></w:trPr>";
+    [...r.cells].forEach(c => {
+      const span = c.colSpan || 1, th = c.tagName === "TH";
+      x += `<w:tc><w:tcPr><w:tcW w:w="${colW * span}" w:type="dxa"/>${span > 1 ? `<w:gridSpan w:val="${span}"/>` : ""}${th ? '<w:shd w:val="clear" w:color="auto" w:fill="E2E8F0"/>' : ""}</w:tcPr>${wPara(wRun(c.textContent.trim(), { bold: th, size: 18 }), { center: true, after: 0, line: 260 })}</w:tc>`;
+    });
+    x += "</w:tr>";
+  });
+  return x + "</w:tbl>";
+}
+
+async function buildPaperDocx() {
+  const letters = ["A", "B", "C", "D"];
   const isTeacher = document.getElementById("p-version").value === "teacher";
-  saveFile(blob, isTeacher ? "TAIROA_機器人學_教師解答卷.doc" : "TAIROA_機器人學_學生測驗卷.doc");
-  showToast("已匯出 Word 試卷！");
+  const title = document.getElementById("p-title").value.trim() || "TAIROA 機器人工程師（初階）學科模擬測驗卷";
+  const B = docxBuilder();
+  let body = "";
+
+  body += wPara(wRun(isTeacher ? `${title}【教師解答卷】` : title, { bold: true, size: 32 }), { center: true, after: 120 });
+  body += wPara(wRun("班級：______________　　學號：______________　　姓名：______________　　得分：________", { size: 22 }), { center: true, after: 200, border: 12 });
+
+  for (let idx = 0; idx < paperList.length; idx++) {
+    const q = paperList[idx];
+    // 題幹
+    body += wPara(
+      (isTeacher ? wRun(`[${letters[q.ans]}] `, { bold: true, color: "E11D48", size: 22 }) : wRun("(　) ", { bold: true, size: 22 })) +
+      wRun(`${idx + 1}. ${htmlToPlain(q.q)}`, { bold: true, size: 22 }) +
+      wRun(`  [${q.book}#${q.id}]`, { color: "94A3B8", size: 16 }),
+      { keepNext: true, before: 120, after: 80 });
+
+    // 附圖 / 規格表
+    const imgs = qImgs(q.id);
+    try {
+      if (imgs.length) {
+        let runs = "";
+        for (const s of imgs) {
+          const r = await rasterFromDataUrl(s);
+          runs += B.imageRun(r, imgs.length > 1 ? 7.6 : 12, 6.5) + wRun("  ");
+        }
+        body += wPara(runs, { keepNext: true, after: 80, ind: 300 });
+      } else if (q.svg && !q.hideDefaultSvg) {
+        const box = document.createElement("div");
+        box.innerHTML = getBuiltInSvg(q.svg);
+        const nodes = [];
+        (function walk(el) {
+          [...el.childNodes].forEach(n => {
+            if (n.nodeType === 3) { const t = n.textContent.trim(); if (t) nodes.push({ t: "text", v: t }); }
+            else if (n.nodeType === 1) {
+              const tag = n.tagName.toLowerCase();
+              if (tag === "svg") nodes.push({ t: "svg", el: n });
+              else if (tag === "table") nodes.push({ t: "table", el: n });
+              else walk(n);
+            }
+          });
+        })(box);
+        for (const n of nodes) {
+          if (n.t === "svg") body += wPara(B.imageRun(await rasterFromSvg(n.el), 11, 7), { keepNext: true, after: 80, ind: 300 });
+          else if (n.t === "table") body += wTableFromHtml(n.el) + wPara("", { after: 80, keepNext: true });
+          else body += wPara(wRun(n.v, { size: 18, color: "475569" }), { keepNext: true, after: 40, ind: 300 });
+        }
+      }
+    } catch (e) {
+      body += wPara(wRun("（此題附圖無法轉入 Word，請參考網頁版）", { size: 18, color: "94A3B8" }), { keepNext: true });
+    }
+
+    // 選項（兩欄）
+    const cells = [];
+    for (let i = 0; i < 4; i++) {
+      let c = wPara(wRun(`(${letters[i]}) ${htmlToPlain(q.opts[i])}`, { size: 21 }), { after: 40, ind: 200 });
+      const oi = (q.optImgs || [])[i];
+      if (oi) {
+        try { c += wPara(B.imageRun(await rasterFromDataUrl(oi), 6.5, 3.5), { after: 40, ind: 200 }); } catch (e) {}
+      }
+      cells.push(c);
+    }
+    const cw = 4819;
+    const tc = x => `<w:tc><w:tcPr><w:tcW w:w="${cw}" w:type="dxa"/></w:tcPr>${x}</w:tc>`;
+    body += `<w:tbl><w:tblPr><w:tblW w:w="${cw * 2}" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="${cw}"/><w:gridCol w:w="${cw}"/></w:tblGrid>` +
+            `<w:tr><w:trPr><w:cantSplit/></w:trPr>${tc(cells[0])}${tc(cells[1])}</w:tr><w:tr><w:trPr><w:cantSplit/></w:trPr>${tc(cells[2])}${tc(cells[3])}</w:tr></w:tbl>`;
+
+    // 教師解答
+    if (isTeacher) {
+      body += wPara(wRun(`【標準答案：(${letters[q.ans]})】`, { bold: true, color: "064E3B", size: 20 }) + wRun(" " + htmlToPlain(q.exp), { color: "064E3B", size: 20 }),
+        { shade: "ECFDF5", before: 60, after: 60, ind: 100, line: 280 });
+    }
+    // 題與題之間的淡色分隔線
+    body += wPara("", { border: 4, borderColor: "E2E8F0", after: 100, line: 160 });
+  }
+
+  const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const docXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="${W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Microsoft JhengHei" w:cs="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="en-US" w:eastAsia="zh-TW"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`;
+  const exts = [...new Set(B.media.map(m => m.ext))];
+  const ctXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${exts.map(e => `<Default Extension="${e}" ContentType="image/${e}"/>`).join("")}<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`;
+  const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>${B.media.map(m => `<Relationship Id="${m.rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${m.name}"/>`).join("")}</Relationships>`;
+
+  const enc = new TextEncoder();
+  const files = [
+    { name: "[Content_Types].xml", data: enc.encode(ctXml) },
+    { name: "_rels/.rels", data: enc.encode(relsXml) },
+    { name: "word/document.xml", data: enc.encode(docXml) },
+    { name: "word/styles.xml", data: enc.encode(stylesXml) },
+    { name: "word/_rels/document.xml.rels", data: enc.encode(docRelsXml) },
+    ...B.media.map(m => ({ name: "word/media/" + m.name, data: m.u8 }))
+  ];
+  return zipStore(files, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+}
+
+async function exportPaperToWord() {
+  if (!paperList || !paperList.length) { showToast("目前沒有試卷內容，請先組卷", "error"); return; }
+  showToast("正在產生 Word 檔，請稍候…");
+  try {
+    const blob = await buildPaperDocx();
+    const isTeacher = document.getElementById("p-version").value === "teacher";
+    const filename = isTeacher ? "TAIROA_機器人學_教師解答卷.docx" : "TAIROA_機器人學_學生測驗卷.docx";
+    const hasNativeBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveFile;
+    if (hasNativeBridge) {
+      saveFile(blob, filename);          // iOS App：原生分享面板
+    } else {
+      const url = URL.createObjectURL(blob);   // 一般瀏覽器：直接下載
+      const a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+    showToast("已匯出 Word 試卷 (.docx)！", "success");
+  } catch (err) {
+    console.error(err);
+    showToast("匯出 Word 失敗：" + (err && err.message ? err.message : err), "error");
+  }
 }
 
 
