@@ -3150,12 +3150,29 @@ function importJsonBackup(event) {
 }
 
 function exportFullCustomizedHtml() {
-  const rawHtml = document.documentElement.outerHTML;
-  const inject = seedScript();
-  const finalHtml = "<!DOCTYPE html>\n" + rawHtml.replace("</head>", `${inject}\n</head>`);
-  const blob = new Blob([finalHtml], { type: "text/html;charset=utf-8" });
-  saveFile(blob, "TAIROA_機器人學出題系統_自訂題庫版.html");
-  showToast("已匯出包含所有題目與圖片修改的永久獨立網頁！");
+  const keys = [LS_WRONG, LS_IMAGES, LS_EDITS, LS_ADDED, LS_OPTIMGS];
+  const data = {};
+  keys.forEach(k => {
+    let v = null;
+    try { v = localStorage.getItem(k); } catch (err) {}
+    data[k] = v === null ? (k === LS_WRONG || k === LS_ADDED ? "[]" : "{}") : v;
+  });
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+  const hasNativeBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveFile;
+  if (hasNativeBridge) {
+    saveFile(blob, "local_storage_backup.json");   // iOS App：走原生分享面板存檔
+  } else {
+    // 電腦 / 一般瀏覽器：直接下載到瀏覽器的下載資料夾（不走系統分享視窗）
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "local_storage_backup.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+  showToast("已下載最新的 local_storage_backup.json（請到瀏覽器的下載資料夾查看）");
 }
 
 // 鍵盤快捷鍵支援
